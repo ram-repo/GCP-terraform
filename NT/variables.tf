@@ -1,53 +1,90 @@
-variable "project_name" {
-  description = "The name of the GCP project"
-  type        = string
-  default     = "hpoll-quest-tqb-dev"
+provider "google" {
+  project = var.project_name
+  region  = var.region
 }
 
-variable "region" {
-  description = "The region for GCP resources"
-  type        = string
-  default     = "us-central1"
+# Artifact Registry for Docker images
+resource "google_artifact_registry_repository" "artifact_repo" {
+  location = var.region
+  repository_id = var.artifact_registry_name
+  format = "DOCKER"
+  description = "Artifact Registry for Cloud Run service images"
 }
 
-variable "artifact_registry_name" {
-  description = "Name of the Artifact Registry repository"
-  type        = string
-  default     = "my-repo"
+# Secret Manager for storing secrets
+resource "google_secret_manager_secret" "my_secret" {
+  secret_id = var.secret_id
+  replication {
+    automatic = true
+  }
 }
 
-variable "secret_id" {
-  description = "Secret ID for Secret Manager"
-  type        = string
-  default     = "my-secret"
+resource "google_secret_manager_secret_version" "my_secret_version" {
+  secret = google_secret_manager_secret.my_secret.id
+  secret_data = "<YOUR_SECRET_VALUE>"
 }
 
-variable "cloud_run_service_name" {
-  description = "Cloud Run service name"
-  type        = string
-  default     = "ai-langchain-service"
+# MemoryStore (Redis) for caching
+resource "google_redis_instance" "redis_instance" {
+  name = var.redis_instance_name
+  tier = "STANDARD_HA"
+  memory_size_gb = 1
+  location_id = var.region
 }
 
-variable "redis_instance_name" {
-  description = "MemoryStore Redis instance name"
-  type        = string
-  default     = "my-redis-instance"
+# VPC Network for serverless
+resource "google_compute_network" "serverless_vpc" {
+  name = "serverless-vpc"
+  auto_create_subnetworks = true
 }
 
-variable "vpc_connector_name" {
-  description = "Serverless VPC Connector name"
-  type        = string
-  default     = "serverless-vpc-connector"
+# Serverless VPC Connector
+resource "google_vpc_access_connector" "vpc_connector" {
+  name       = var.vpc_connector_name
+  network    = google_compute_network.serverless_vpc.name
+  region     = var.region
+  ip_cidr_range = "10.8.0.0/28"
 }
 
-variable "url_map_name" {
-  description = "URL Map name for routing"
-  type        = string
-  default     = "hpoll-quest-dev-ai-url-map"
+# Cloud Run service for AI LangChain Service
+resource "google_cloud_run_service" "cloud_run_service" {
+  name     = var.cloud_run_service_name
+  location = var.region
+  template {
+    spec {
+      containers {
+        image = "us-central1-docker.pkg.dev/${var.project_name}/${var.artifact_registry_name}/my-image:latest"
+        env {
+          name  = "REDIS_HOST"
+          value = google_redis_instance.redis_instance.host
+        }
+      }
+    }
+  }
+  traffic {
+    percent         = 100
+    latest_revision = true
+  }
 }
 
-variable "cloud_armor_policy_name" {
-  description = "Cloud Armor policy name"
-  type        = string
-  default     = "cloud-armor-policy"
+# Cloud Armor security policy
+resource "google_compute_security_policy" "cloud_armor_policy" {
+  name = var.cloud_armor_policy_name
+  description = "Security policy for Cloud Armor to protect the Cloud Run service"
+  rule {
+    priority = 1000
+    match {
+      versioned_expr = "SRC_IPS_V1"
+      config {
+        src_ip_ranges = ["0.0.0.0/0"]
+      }
+    }
+    action = "allow"
+  }
+}
+
+# URL Map for routing
+resource "google_compute_url_map" "url_map" {
+  name           = var.url_map_name
+  default_service = google_cloud_run_service.cloud_run_service.status[0].url
 }
